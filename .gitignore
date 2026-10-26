@@ -1,0 +1,19 @@
+# Build directory
+/build/
+
+# Executables and binaries if built outside /build/
+*.exe
+*.dll
+*.so
+*.dylib
+*.obj
+*.o
+*.lib
+*.a
+
+# OS-specific files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
