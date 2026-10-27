@@ -56,7 +56,8 @@ enum : int { ID_LIST = 100, ID_BTN_NEW, ID_BTN_EDIT, ID_BTN_DEL,
              CMD_SHOW = 200, CMD_TOPMOST, CMD_QUIT };
 enum : UINT { WM_TRAY = WM_APP + 1, WM_SHOWAPP = WM_APP + 2 };
 static const UINT_PTR TICK_ID = 1;
-static const int      COL_RESET = 4;                    // last column holds the per-row Reset button
+// list columns: [toggle] [label] [start] [ends] [remaining] [reset button]
+enum : int { COL_TOGGLE = 0, COL_LABEL, COL_START, COL_END, COL_REMAIN, COL_RESET, COL_COUNT };
 static const int64_t  RESET_SECONDS = 7LL * 86400;      // Reset restarts the countdown with exactly 7 days
 static const int64_t  EPOCH_DIFF = 11644473600LL;   // 1601 -> 1970 in seconds
 
@@ -67,6 +68,7 @@ struct Countdown {
     int64_t      start = 0;      // UTC epoch seconds
     int64_t      duration = 0;   // seconds
     bool         n30 = false, n15 = false, n0 = false;   // notifications already sent
+    bool         checked = false;                         // the per-row boolean toggle (default false)
     std::wstring shown;          // text currently displayed in the "Remaining" cell
     int64_t end() const { return start + duration; }
 };
@@ -146,15 +148,18 @@ static bool DbOpen() {
            " duration INTEGER NOT NULL,"
            " n30 INTEGER NOT NULL DEFAULT 0,"
            " n15 INTEGER NOT NULL DEFAULT 0,"
-           " n0  INTEGER NOT NULL DEFAULT 0);"
+           " n0  INTEGER NOT NULL DEFAULT 0,"
+           " checked INTEGER NOT NULL DEFAULT 0);"
            "CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value INTEGER);");
+    // databases created by an older version lack the column; this fails harmlessly if it already exists
+    DbExec("ALTER TABLE timers ADD COLUMN checked INTEGER NOT NULL DEFAULT 0;");
     return true;
 }
 
 static void DbLoad() {
     g_items.clear();
     sqlite3_stmt* st = nullptr;
-    if (sqlite3_prepare16_v2(g_db, L"SELECT id,label,start,duration,n30,n15,n0 FROM timers", -1, &st, nullptr) == SQLITE_OK) {
+    if (sqlite3_prepare16_v2(g_db, L"SELECT id,label,start,duration,n30,n15,n0,checked FROM timers", -1, &st, nullptr) == SQLITE_OK) {
         while (sqlite3_step(st) == SQLITE_ROW) {
             Countdown c;
             c.id = sqlite3_column_int64(st, 0);
@@ -165,6 +170,7 @@ static void DbLoad() {
             c.n30 = sqlite3_column_int(st, 4) != 0;
             c.n15 = sqlite3_column_int(st, 5) != 0;
             c.n0  = sqlite3_column_int(st, 6) != 0;
+            c.checked = sqlite3_column_int(st, 7) != 0;
             g_items.push_back(std::move(c));
         }
     }
@@ -201,6 +207,15 @@ static void DbUpdateFlags(const Countdown& c) {
         sqlite3_bind_int(st, 2, c.n15);
         sqlite3_bind_int(st, 3, c.n0);
         sqlite3_bind_int64(st, 4, c.id);
+        sqlite3_step(st);
+    }
+    sqlite3_finalize(st);
+}
+static void DbUpdateChecked(const Countdown& c) {
+    sqlite3_stmt* st = nullptr;
+    if (sqlite3_prepare16_v2(g_db, L"UPDATE timers SET checked=? WHERE id=?", -1, &st, nullptr) == SQLITE_OK) {
+        sqlite3_bind_int(st, 1, c.checked);
+        sqlite3_bind_int64(st, 2, c.id);
         sqlite3_step(st);
     }
     sqlite3_finalize(st);
@@ -316,7 +331,7 @@ static void RefreshRow(size_t i, int64_t now) {
     std::wstring t = RemainText(c, now);
     if (t != c.shown) {
         c.shown = t;
-        ListView_SetItemText(g_list, (int)i, 3, (LPWSTR)c.shown.c_str());
+        ListView_SetItemText(g_list, (int)i, COL_REMAIN, (LPWSTR)c.shown.c_str());
     }
 }
 
@@ -332,11 +347,12 @@ static void Rebuild(int64_t selectId = 0) {
         Countdown& c = g_items[i];
         c.shown.clear();
         LVITEMW it{}; it.mask = LVIF_TEXT | LVIF_PARAM; it.iItem = (int)i;
-        it.pszText = (LPWSTR)c.label.c_str(); it.lParam = (LPARAM)c.id;
+        it.pszText = (LPWSTR)L""; it.lParam = (LPARAM)c.id;      // column 0 is the toggle, painted in custom draw
         ListView_InsertItem(g_list, &it);
         std::wstring s = FmtDateTime(c.start), e = FmtDateTime(c.end());
-        ListView_SetItemText(g_list, (int)i, 1, (LPWSTR)s.c_str());
-        ListView_SetItemText(g_list, (int)i, 2, (LPWSTR)e.c_str());
+        ListView_SetItemText(g_list, (int)i, COL_LABEL, (LPWSTR)c.label.c_str());
+        ListView_SetItemText(g_list, (int)i, COL_START, (LPWSTR)s.c_str());
+        ListView_SetItemText(g_list, (int)i, COL_END,   (LPWSTR)e.c_str());
         RefreshRow(i, now);
         if (c.id == selectId) sel = (int)i;
     }
@@ -564,6 +580,25 @@ static void DrawResetButton(HDC dc, int item) {
     SelectObject(dc, old);
 }
 
+// Paint the boolean toggle (a check box) in the first column.
+static void DrawToggle(HDC dc, int item) {
+    if (item < 0 || item >= (int)g_items.size()) return;
+    RECT cell;
+    if (!ListView_GetSubItemRect(g_list, item, COL_TOGGLE, LVIR_LABEL, &cell)) return;
+    FillRect(dc, &cell, GetSysColorBrush(COLOR_WINDOW));
+    int side = S(15);
+    RECT b{ cell.left + ((cell.right - cell.left) - side) / 2, cell.top + ((cell.bottom - cell.top) - side) / 2, 0, 0 };
+    b.right = b.left + side; b.bottom = b.top + side;
+    DrawFrameControl(dc, &b, DFC_BUTTON, DFCS_BUTTONCHECK | (g_items[item].checked ? DFCS_CHECKED : 0));
+}
+
+static void ToggleItem(int i) {
+    if (i < 0 || i >= (int)g_items.size()) return;
+    g_items[i].checked = !g_items[i].checked;
+    DbUpdateChecked(g_items[i]);
+    ListView_RedrawItems(g_list, i, i);
+}
+
 static COLORREF RowColor(size_t i) {   // CLR_INVALID = leave default colour
     if (i >= g_items.size()) return CLR_INVALID;
     int64_t now = NowEpoch(), rem = g_items[i].end() - now;
@@ -629,13 +664,14 @@ static void Layout() {
     MoveWindow(g_btnEdit, m + (bw + m),      y, bw, bh, TRUE);
     MoveWindow(g_btnDel,  m + 2 * (bw + m),  y, bw, bh, TRUE);
 
-    int cr = S(90);                                    // fixed-width Reset column on the far right
-    int total = W - 2 * m - S(6) - GetSystemMetrics(SM_CXVSCROLL) - cr;
+    int ct = S(34), cr = S(90);                        // fixed-width toggle (left) and Reset (right) columns
+    int total = W - 2 * m - S(6) - GetSystemMetrics(SM_CXVSCROLL) - ct - cr;
     int c0 = total * 28 / 100, c1 = total * 22 / 100, c2 = total * 22 / 100;
-    ListView_SetColumnWidth(g_list, 0, c0);
-    ListView_SetColumnWidth(g_list, 1, c1);
-    ListView_SetColumnWidth(g_list, 2, c2);
-    ListView_SetColumnWidth(g_list, 3, std::max(S(60), total - c0 - c1 - c2));
+    ListView_SetColumnWidth(g_list, COL_TOGGLE, ct);
+    ListView_SetColumnWidth(g_list, COL_LABEL, c0);
+    ListView_SetColumnWidth(g_list, COL_START, c1);
+    ListView_SetColumnWidth(g_list, COL_END, c2);
+    ListView_SetColumnWidth(g_list, COL_REMAIN, std::max(S(60), total - c0 - c1 - c2));
     ListView_SetColumnWidth(g_list, COL_RESET, cr);
 }
 
@@ -680,8 +716,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                                  0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)ID_LIST, g_hInst, nullptr);
         SendMessageW(g_list, WM_SETFONT, (WPARAM)g_font, TRUE);
         ListView_SetExtendedListViewStyle(g_list, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_LABELTIP);
-        const wchar_t* heads[] = { L"Label", L"Start", L"Ends", L"Remaining", L"" };
-        for (int i = 0; i < 5; ++i) {
+        const wchar_t* heads[COL_COUNT] = { L"", L"Label", L"Start", L"Ends", L"Remaining", L"" };
+        for (int i = 0; i < COL_COUNT; ++i) {
             LVCOLUMNW col{}; col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
             col.pszText = (LPWSTR)heads[i]; col.cx = S(100); col.iSubItem = i;
             ListView_InsertColumn(g_list, i, &col);
@@ -739,7 +775,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             case CDDS_ITEMPREPAINT: return CDRF_NOTIFYSUBITEMDRAW;
             case CDDS_ITEMPREPAINT | CDDS_SUBITEM: {
                 size_t i = (size_t)cd->nmcd.dwItemSpec;
-                if (cd->iSubItem == COL_RESET) { DrawResetButton(cd->nmcd.hdc, (int)i); return CDRF_SKIPDEFAULT; }
+                if (cd->iSubItem == COL_TOGGLE) { DrawToggle(cd->nmcd.hdc, (int)i); return CDRF_SKIPDEFAULT; }
+                if (cd->iSubItem == COL_RESET)  { DrawResetButton(cd->nmcd.hdc, (int)i); return CDRF_SKIPDEFAULT; }
                 COLORREF col = RowColor(i);
                 if (col != CLR_INVALID) cd->clrText = col;
                 return CDRF_NEWFONT;
@@ -750,14 +787,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case NM_CLICK: {
             LVHITTESTINFO ht{}; ht.pt = ((NMITEMACTIVATE*)lp)->ptAction;
             ListView_SubItemHitTest(g_list, &ht);
-            if (ht.iItem >= 0 && ht.iSubItem == COL_RESET) ResetItem(ht.iItem);
+            if (ht.iItem >= 0 && ht.iSubItem == COL_RESET)  ResetItem(ht.iItem);
+            if (ht.iItem >= 0 && ht.iSubItem == COL_TOGGLE) ToggleItem(ht.iItem);
             return 0;
         }
         case LVN_ITEMCHANGED: UpdateButtons(); return 0;
         case NM_DBLCLK: {
             LVHITTESTINFO ht{}; ht.pt = ((NMITEMACTIVATE*)lp)->ptAction;
             ListView_SubItemHitTest(g_list, &ht);
-            if (ht.iItem >= 0 && ht.iSubItem != COL_RESET) EditCountdown();   // double-click on Reset must not open rename
+            if (ht.iItem >= 0 && ht.iSubItem != COL_RESET && ht.iSubItem != COL_TOGGLE) EditCountdown();   // button cells must not open rename
             return 0;
         }
         case NM_RCLICK: {
@@ -791,11 +829,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_CLOSE: {        // closing = hide into the tray
         SaveSettings();
         ShowWindow(hwnd, SW_HIDE);
-        static bool hinted = false;
-        if (!hinted) {
-            hinted = true;
-            Notify(kAppName, L"Still running in the system tray. Right-click the tray icon to quit.");
-        }
         return 0;
     }
     case WM_DESTROY:
