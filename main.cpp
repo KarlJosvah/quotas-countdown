@@ -127,7 +127,7 @@ static std::wstring FmtDur(int64_t s) {
 static std::wstring RemainText(const Countdown& c, int64_t now) {
     if (now < c.start) return L"Starts in " + FmtDur(c.start - now);
     int64_t rem = c.end() - now;
-    if (rem <= 0) return L"Expired";
+    if (rem <= 0) return L"Refreshed";
     return FmtDur(rem);
 }
 
@@ -685,17 +685,22 @@ static void OnTick() {
         bool dirty = false;
         if (rem <= 0) {
             if (!c.n0) {
-                Notify(L"Time's up!", L"\"" + c.label + L"\" has expired.");
+                Notify(L"Refreshed!", L"\"" + c.label + L"\" has refreshed.");
                 c.n0 = c.n15 = c.n30 = true; dirty = true;
+                if (!c.checked) {                       // timeout automatically turns the checkbox on
+                    c.checked = true;
+                    DbUpdateChecked(c);
+                    if (visible) ListView_RedrawItems(g_list, (int)i, (int)i);
+                }
             }
         } else if (rem <= 15 * 60) {
             if (!c.n15) {
-                Notify(L"15 minutes left", L"\"" + c.label + L"\" expires in 15 minutes.");
+                Notify(L"15 minutes left", L"\"" + c.label + L"\" refreshes in 15 minutes.");
                 c.n15 = c.n30 = true; dirty = true;
             }
         } else if (rem <= 30 * 60) {
             if (!c.n30) {
-                Notify(L"30 minutes left", L"\"" + c.label + L"\" expires in 30 minutes.");
+                Notify(L"30 minutes left", L"\"" + c.label + L"\" refreshes in 30 minutes.");
                 c.n30 = true; dirty = true;
             }
         }
