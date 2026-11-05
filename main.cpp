@@ -80,7 +80,7 @@ static std::vector<Countdown> g_items;
 
 // -------------------------------------------------------------------- globals
 static HINSTANCE g_hInst;
-static HWND      g_hwnd, g_list, g_search, g_btnNew, g_btnEdit, g_btnDel;
+static HWND      g_hwnd, g_list, g_search, g_count, g_btnNew, g_btnEdit, g_btnDel;
 static std::wstring g_filter;          // lower-cased search text
 static std::vector<int> g_view;        // list row -> index in g_items (rows hidden by the filter are absent)
 static HFONT     g_font;
@@ -354,6 +354,16 @@ static void RefreshRow(int row, int64_t now) {
     }
 }
 
+// "N items" for what is shown; "N of M items" when the search filter hides some.
+static void UpdateCount() {
+    if (!g_count) return;
+    size_t v = g_view.size(), total = g_items.size();
+    std::wstring t = std::to_wstring(v);
+    if (v == total) t += (v == 1 ? L" item" : L" items");
+    else            t += L" of " + std::to_wstring(total) + L" items";
+    SetWindowTextW(g_count, t.c_str());
+}
+
 static void Rebuild(int64_t selectId = 0) {
     std::stable_sort(g_items.begin(), g_items.end(), [](const Countdown& a, const Countdown& b) {
         return a.end() != b.end() ? a.end() < b.end() : a.id < b.id;
@@ -384,6 +394,7 @@ static void Rebuild(int64_t selectId = 0) {
     SendMessageW(g_list, WM_SETREDRAW, TRUE, 0);
     InvalidateRect(g_list, nullptr, TRUE);
     UpdateButtons();
+    UpdateCount();
 }
 
 // ------------------------------------------------------------ create/edit dialog
@@ -679,12 +690,14 @@ static void ShowListMenu(bool hasItem) {
 }
 
 static void Layout() {
-    if (!g_list || !g_search) return;
+    if (!g_list || !g_search || !g_count) return;
     RECT rc; GetClientRect(g_hwnd, &rc);
     int W = rc.right, H = rc.bottom;
     int m = S(8), bh = S(28), bw = S(90), sh = S(24);
     MoveWindow(g_search, m, m, W - 2 * m, sh, TRUE);                 // search box on top
-    int ly = 2 * m + sh;
+    int cy = m + sh + S(3), ch = S(18);
+    MoveWindow(g_count, m + S(2), cy, W - 2 * m - S(2), ch, TRUE);   // item-count label between search and table
+    int ly = cy + ch + S(3);
     MoveWindow(g_list, m, ly, W - 2 * m, H - 2 * m - bh - ly, TRUE);
     int y = H - m - bh;
     MoveWindow(g_btnNew,  m,                 y, bw, bh, TRUE);
@@ -757,6 +770,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         SendMessageW(g_search, WM_SETFONT, (WPARAM)g_font, TRUE);
         SendMessageW(g_search, EM_SETLIMITTEXT, 100, 0);
         SendMessageW(g_search, EM_SETCUEBANNER, TRUE, (LPARAM)L"Search label...  (Ctrl+F)");
+        g_count = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_LEFT | SS_NOPREFIX,
+                                  0, 0, 0, 0, hwnd, nullptr, g_hInst, nullptr);
+        SendMessageW(g_count, WM_SETFONT, (WPARAM)g_font, TRUE);
         g_list = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
                                  WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
                                  0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)ID_LIST, g_hInst, nullptr);
