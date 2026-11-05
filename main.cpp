@@ -52,8 +52,11 @@ static const wchar_t kMainClass[] = L"CountdownWidgetMain";
 static const wchar_t kDlgClass[]  = L"CountdownWidgetDlg";
 static const wchar_t kAppName[]   = L"Countdown Widget";
 
-enum : int { ID_LIST = 100, ID_BTN_NEW, ID_BTN_EDIT, ID_BTN_DEL,
-             CMD_SHOW = 200, CMD_TOPMOST, CMD_QUIT };
+enum : int { ID_LIST = 100, ID_BTN_NEW, ID_BTN_EDIT, ID_BTN_DEL, ID_SEARCH,
+             CMD_SHOW = 200, CMD_TOPMOST, CMD_QUIT, CMD_SEARCH };
+#ifndef EM_SETCUEBANNER
+#define EM_SETCUEBANNER (0x1500 + 1)
+#endif
 enum : UINT { WM_TRAY = WM_APP + 1, WM_SHOWAPP = WM_APP + 2 };
 static const UINT_PTR TICK_ID = 1;
 // list columns: [toggle] [label] [start] [ends] [remaining] [reset button]
@@ -77,7 +80,9 @@ static std::vector<Countdown> g_items;
 
 // -------------------------------------------------------------------- globals
 static HINSTANCE g_hInst;
-static HWND      g_hwnd, g_list, g_btnNew, g_btnEdit, g_btnDel;
+static HWND      g_hwnd, g_list, g_search, g_btnNew, g_btnEdit, g_btnDel;
+static std::wstring g_filter;          // lower-cased search text
+static std::vector<int> g_view;        // list row -> index in g_items (rows hidden by the filter are absent)
 static HFONT     g_font;
 static HICON     g_iconBig, g_iconSmall;
 static NOTIFYICONDATAW g_nid;
@@ -318,7 +323,19 @@ static void Notify(const std::wstring& title, const std::wstring& text) {
 }
 
 // ----------------------------------------------------------------- list view
-static int SelIndex() { return ListView_GetNextItem(g_list, -1, LVNI_SELECTED); }
+static std::wstring Lower(std::wstring s) {
+    if (!s.empty()) CharLowerBuffW(&s[0], (DWORD)s.size());
+    return s;
+}
+static bool Matches(const Countdown& c) { return g_filter.empty() || Lower(c.label).find(g_filter) != std::wstring::npos; }
+
+// With a filter active, list rows no longer equal indices in g_items; these convert between the two.
+static int ListToItem(int row) { return (row >= 0 && row < (int)g_view.size()) ? g_view[row] : -1; }
+static int ItemToList(int idx) {
+    for (int r = 0; r < (int)g_view.size(); ++r) if (g_view[r] == idx) return r;
+    return -1;
+}
+static int SelIndex() { return ListToItem(ListView_GetNextItem(g_list, -1, LVNI_SELECTED)); }   // index in g_items
 
 static void UpdateButtons() {
     BOOL has = SelIndex() >= 0;
@@ -326,12 +343,14 @@ static void UpdateButtons() {
     EnableWindow(g_btnDel, has);
 }
 
-static void RefreshRow(size_t i, int64_t now) {
-    Countdown& c = g_items[i];
+static void RefreshRow(int row, int64_t now) {
+    int idx = ListToItem(row);
+    if (idx < 0) return;
+    Countdown& c = g_items[idx];
     std::wstring t = RemainText(c, now);
     if (t != c.shown) {
         c.shown = t;
-        ListView_SetItemText(g_list, (int)i, COL_REMAIN, (LPWSTR)c.shown.c_str());
+        ListView_SetItemText(g_list, row, COL_REMAIN, (LPWSTR)c.shown.c_str());
     }
 }
 
@@ -343,18 +362,20 @@ static void Rebuild(int64_t selectId = 0) {
     int sel = -1;
     SendMessageW(g_list, WM_SETREDRAW, FALSE, 0);
     ListView_DeleteAllItems(g_list);
-    for (size_t i = 0; i < g_items.size(); ++i) {
-        Countdown& c = g_items[i];
+    g_view.clear();
+    for (size_t i = 0; i < g_items.size(); ++i) if (Matches(g_items[i])) g_view.push_back((int)i);
+    for (int row = 0; row < (int)g_view.size(); ++row) {
+        Countdown& c = g_items[g_view[row]];
         c.shown.clear();
-        LVITEMW it{}; it.mask = LVIF_TEXT | LVIF_PARAM; it.iItem = (int)i;
+        LVITEMW it{}; it.mask = LVIF_TEXT | LVIF_PARAM; it.iItem = row;
         it.pszText = (LPWSTR)L""; it.lParam = (LPARAM)c.id;      // column 0 is the toggle, painted in custom draw
         ListView_InsertItem(g_list, &it);
         std::wstring s = FmtDateTime(c.start), e = FmtDateTime(c.end());
-        ListView_SetItemText(g_list, (int)i, COL_LABEL, (LPWSTR)c.label.c_str());
-        ListView_SetItemText(g_list, (int)i, COL_START, (LPWSTR)s.c_str());
-        ListView_SetItemText(g_list, (int)i, COL_END,   (LPWSTR)e.c_str());
-        RefreshRow(i, now);
-        if (c.id == selectId) sel = (int)i;
+        ListView_SetItemText(g_list, row, COL_LABEL, (LPWSTR)c.label.c_str());
+        ListView_SetItemText(g_list, row, COL_START, (LPWSTR)s.c_str());
+        ListView_SetItemText(g_list, row, COL_END,   (LPWSTR)e.c_str());
+        RefreshRow(row, now);
+        if (c.id == selectId) sel = row;
     }
     if (sel >= 0) {
         ListView_SetItemState(g_list, sel, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
@@ -530,6 +551,7 @@ static void NewCountdown() {
     c.id = DbInsert(c);
     if (!c.id) { MessageBoxW(g_hwnd, L"Could not save to the database.", kAppName, MB_ICONERROR); return; }
     g_items.push_back(c);
+    if (!Matches(c)) { g_filter.clear(); SetWindowTextW(g_search, L""); }   // don't hide the item that was just created
     Rebuild(c.id);
 }
 
@@ -555,8 +577,9 @@ static void DeleteSelected() {
 }
 
 // Restart a countdown now, for exactly 7 days. Notification flags are cleared so the alerts fire again.
-static void ResetItem(int i) {
-    if (i < 0 || i >= (int)g_items.size()) return;
+static void ResetItem(int row) {
+    int i = ListToItem(row);
+    if (i < 0) return;
     Countdown& c = g_items[i];
     c.start = NowEpoch();
     c.duration = RESET_SECONDS;
@@ -582,25 +605,27 @@ static void DrawResetButton(HDC dc, int item) {
 
 // Paint the boolean toggle (a check box) in the first column.
 static void DrawToggle(HDC dc, int item) {
-    if (item < 0 || item >= (int)g_items.size()) return;
+    int idx = ListToItem(item);
+    if (idx < 0) return;
     RECT cell;
     if (!ListView_GetSubItemRect(g_list, item, COL_TOGGLE, LVIR_LABEL, &cell)) return;
     FillRect(dc, &cell, GetSysColorBrush(COLOR_WINDOW));
     int side = S(15);
     RECT b{ cell.left + ((cell.right - cell.left) - side) / 2, cell.top + ((cell.bottom - cell.top) - side) / 2, 0, 0 };
     b.right = b.left + side; b.bottom = b.top + side;
-    DrawFrameControl(dc, &b, DFC_BUTTON, DFCS_BUTTONCHECK | (g_items[item].checked ? DFCS_CHECKED : 0));
+    DrawFrameControl(dc, &b, DFC_BUTTON, DFCS_BUTTONCHECK | (g_items[idx].checked ? DFCS_CHECKED : 0));
 }
 
-static void ToggleItem(int i) {
-    if (i < 0 || i >= (int)g_items.size()) return;
+static void ToggleItem(int row) {
+    int i = ListToItem(row);
+    if (i < 0) return;
     g_items[i].checked = !g_items[i].checked;
     DbUpdateChecked(g_items[i]);
-    ListView_RedrawItems(g_list, i, i);
+    ListView_RedrawItems(g_list, row, row);
 }
 
-static COLORREF RowColor(size_t i) {   // CLR_INVALID = leave default colour
-    if (i >= g_items.size()) return CLR_INVALID;
+static COLORREF RowColor(int i) {   // i = index in g_items; CLR_INVALID = leave default colour
+    if (i < 0 || i >= (int)g_items.size()) return CLR_INVALID;
     int64_t now = NowEpoch(), rem = g_items[i].end() - now;
     if (now < g_items[i].start) return RGB(120, 120, 120);
     if (rem <= 0)               return RGB(200, 0, 0);
@@ -645,7 +670,7 @@ static void ShowTrayMenu() {
 
 static void ShowListMenu(bool hasItem) {
     HMENU m = CreatePopupMenu();
-    AppendMenuW(m, MF_STRING, ID_BTN_NEW, L"New countdown\tIns");
+    AppendMenuW(m, MF_STRING, ID_BTN_NEW, L"New countdown\tCtrl+N");
     AppendMenuW(m, MF_STRING | (hasItem ? 0 : MF_GRAYED), ID_BTN_EDIT, L"Rename\tF2");
     AppendMenuW(m, MF_STRING | (hasItem ? 0 : MF_GRAYED), ID_BTN_DEL, L"Delete\tDel");
     POINT pt; GetCursorPos(&pt);
@@ -654,11 +679,13 @@ static void ShowListMenu(bool hasItem) {
 }
 
 static void Layout() {
-    if (!g_list) return;
+    if (!g_list || !g_search) return;
     RECT rc; GetClientRect(g_hwnd, &rc);
     int W = rc.right, H = rc.bottom;
-    int m = S(8), bh = S(28), bw = S(90);
-    MoveWindow(g_list, m, m, W - 2 * m, H - 3 * m - bh, TRUE);
+    int m = S(8), bh = S(28), bw = S(90), sh = S(24);
+    MoveWindow(g_search, m, m, W - 2 * m, sh, TRUE);                 // search box on top
+    int ly = 2 * m + sh;
+    MoveWindow(g_list, m, ly, W - 2 * m, H - 2 * m - bh - ly, TRUE);
     int y = H - m - bh;
     MoveWindow(g_btnNew,  m,                 y, bw, bh, TRUE);
     MoveWindow(g_btnEdit, m + (bw + m),      y, bw, bh, TRUE);
@@ -673,6 +700,13 @@ static void Layout() {
     ListView_SetColumnWidth(g_list, COL_END, c2);
     ListView_SetColumnWidth(g_list, COL_REMAIN, std::max(S(60), total - c0 - c1 - c2));
     ListView_SetColumnWidth(g_list, COL_RESET, cr);
+}
+
+static void OnSearchChanged() {
+    wchar_t buf[256]; GetWindowTextW(g_search, buf, 256);
+    g_filter = Lower(buf);
+    int si = SelIndex();
+    Rebuild(si >= 0 ? g_items[si].id : 0);          // keep the selection if it is still visible
 }
 
 // ----------------------------------------------------------------- tick / alerts
@@ -690,7 +724,8 @@ static void OnTick() {
                 if (!c.checked) {                       // timeout automatically turns the checkbox on
                     c.checked = true;
                     DbUpdateChecked(c);
-                    if (visible) ListView_RedrawItems(g_list, (int)i, (int)i);
+                    int row = ItemToList((int)i);
+                    if (visible && row >= 0) ListView_RedrawItems(g_list, row, row);
                 }
             }
         } else if (rem <= 15 * 60) {
@@ -705,8 +740,9 @@ static void OnTick() {
             }
         }
         if (dirty) DbUpdateFlags(c);
-        if (visible) RefreshRow(i, now);
     }
+    if (visible)
+        for (int row = 0; row < (int)g_view.size(); ++row) RefreshRow(row, now);
 }
 
 // --------------------------------------------------------------------- main proc
@@ -716,6 +752,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_CREATE: {
         g_hwnd = hwnd;
+        g_search = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                                   0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)ID_SEARCH, g_hInst, nullptr);
+        SendMessageW(g_search, WM_SETFONT, (WPARAM)g_font, TRUE);
+        SendMessageW(g_search, EM_SETLIMITTEXT, 100, 0);
+        SendMessageW(g_search, EM_SETCUEBANNER, TRUE, (LPARAM)L"Search label...  (Ctrl+F)");
         g_list = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
                                  WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
                                  0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)ID_LIST, g_hInst, nullptr);
@@ -764,6 +805,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case ID_BTN_EDIT: EditCountdown();   break;
         case ID_BTN_DEL:  DeleteSelected();  break;
         case CMD_SHOW:    ShowMain();        break;
+        case ID_SEARCH:   if (HIWORD(wp) == EN_CHANGE) OnSearchChanged(); break;
+        case CMD_SEARCH:  SetFocus(g_search); SendMessageW(g_search, EM_SETSEL, 0, -1); break;
         case CMD_TOPMOST: SetTopmost(!g_topmost); break;
         case CMD_QUIT:    SaveSettings(); DestroyWindow(hwnd); break;
         }
@@ -779,10 +822,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             case CDDS_PREPAINT:     return CDRF_NOTIFYITEMDRAW;
             case CDDS_ITEMPREPAINT: return CDRF_NOTIFYSUBITEMDRAW;
             case CDDS_ITEMPREPAINT | CDDS_SUBITEM: {
-                size_t i = (size_t)cd->nmcd.dwItemSpec;
+                int i = (int)cd->nmcd.dwItemSpec;                    // list row
                 if (cd->iSubItem == COL_TOGGLE) { DrawToggle(cd->nmcd.hdc, (int)i); return CDRF_SKIPDEFAULT; }
                 if (cd->iSubItem == COL_RESET)  { DrawResetButton(cd->nmcd.hdc, (int)i); return CDRF_SKIPDEFAULT; }
-                COLORREF col = RowColor(i);
+                COLORREF col = RowColor(ListToItem(i));
                 if (col != CLR_INVALID) cd->clrText = col;
                 return CDRF_NEWFONT;
             }
@@ -899,8 +942,14 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nShow) {
     ShowWindow(hwnd, nShow);
     UpdateWindow(hwnd);
 
+    ACCEL acc[2] = {};
+    acc[0].fVirt = FCONTROL | FVIRTKEY; acc[0].key = 'N'; acc[0].cmd = ID_BTN_NEW;   // Ctrl+N = new countdown
+    acc[1].fVirt = FCONTROL | FVIRTKEY; acc[1].key = 'F'; acc[1].cmd = CMD_SEARCH;   // Ctrl+F = focus search
+    HACCEL accel = CreateAcceleratorTableW(acc, 2);
+
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        if (TranslateAcceleratorW(hwnd, accel, &msg)) continue;
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
