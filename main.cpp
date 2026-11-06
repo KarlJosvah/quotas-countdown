@@ -955,8 +955,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nShow) {
         if (MonitorFromRect(&saved, MONITOR_DEFAULTTONULL))
             SetWindowPos(hwnd, nullptr, saved.left, saved.top, sw, sh, SWP_NOZORDER | SWP_NOACTIVATE);
     }
-    ShowWindow(hwnd, nShow);
-    UpdateWindow(hwnd);
+    // Start hidden: the window is created without WS_VISIBLE and is not shown here, so the app
+    // begins in the system tray. Left-click the tray icon (or launch the exe again) to open it.
+    (void)nShow;
 
     ACCEL acc[2] = {};
     acc[0].fVirt = FCONTROL | FVIRTKEY; acc[0].key = 'N'; acc[0].cmd = ID_BTN_NEW;   // Ctrl+N = new countdown
