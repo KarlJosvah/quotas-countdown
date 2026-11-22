@@ -480,10 +480,8 @@ static bool Collect(HWND h, DlgData& d) {
     long days = wcstol(nb, nullptr, 10);
     days = std::max(0L, std::min(3650L, days));
     d.duration = (int64_t)days * 86400 + du.wHour * 3600 + du.wMinute * 60;
-    if (d.duration <= 0) {
-        MessageBoxW(h, L"The duration must be greater than zero.", kAppName, MB_ICONWARNING);
-        return false;
-    }
+    // a duration of 0 is allowed: the countdown refreshes as soon as its start time is reached
+    (void)h;
     return true;
 }
 
