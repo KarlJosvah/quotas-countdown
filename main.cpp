@@ -637,9 +637,9 @@ static COLORREF RowColor(int i) {   // i = index in g_items; CLR_INVALID = leave
     if (i < 0 || i >= (int)g_items.size()) return CLR_INVALID;
     int64_t now = NowEpoch(), rem = g_items[i].end() - now;
     if (now < g_items[i].start) return RGB(120, 120, 120);
-    if (rem <= 0)               return RGB(200, 0, 0);
+    if (rem <= 0)               return RGB(0, 150, 0);      // refreshed = green
     if (rem <= 15 * 60)         return RGB(210, 100, 0);
-    if (rem <= 30 * 60)         return RGB(160, 120, 0);
+    if (rem <= 30 * 60)         return RGB(214, 168, 0);    // within 30 min = yellow
     return CLR_INVALID;
 }
 
